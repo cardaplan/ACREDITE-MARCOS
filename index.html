@@ -3241,7 +3241,17 @@
         
         function simpleHashForObjects(arr) {
             try {
-                const normalized = JSON.stringify(arr, Object.keys(arr[0] || {}).sort());
+                function sortObjectKeysDeep(obj) {
+                    if (Array.isArray(obj)) {
+                        return obj.map(sortObjectKeysDeep);
+                    } else if (obj && typeof obj === 'object') {
+                        const sorted = {};
+                        Object.keys(obj).sort().forEach(k => { sorted[k] = sortObjectKeysDeep(obj[k]); });
+                        return sorted;
+                    }
+                    return obj;
+                }
+                const normalized = JSON.stringify(sortObjectKeysDeep(Array.isArray(arr) ? arr : [arr]));
                 let hash = 0; for (let i = 0; i < normalized.length; i++) { hash = ((hash << 5) - hash) + normalized.charCodeAt(i); hash |= 0; }
                 return hash;
             } catch (_) {
@@ -6856,7 +6866,7 @@
         function checkIfOpenAtTime(dayOfWeek, timeInMinutes) {
             return new Promise(async (resolve) => {
                 try {
-                    const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                    const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                     const lines = csvText.trim().split('\n');
                     
                     // Procurar pelo dia da semana (começando da linha 1, pois linha 0 é cabeçalho)
@@ -6913,7 +6923,7 @@
          */
         async function getNextOpenTime() {
             try {
-                const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 const lines = csvText.trim().split('\n');
                 const currentTime = getCurrentDateInTimezone();
                 const currentDay = currentTime.getDay();
@@ -11574,8 +11584,8 @@
         }
         async function updateOperatingHours() {
             try {
-                // Fetch CSV data via cache for stability
-                const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                // Fetch CSV data with forced no-cache to avoid oscillation
+                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 
                 // Parse CSV manually
                 const lines = csvText.trim().split('\n');
@@ -11657,19 +11667,7 @@
                 
             } catch (error) {
                 errorLog('Error updating operating hours:', error);
-                // Fallback to static display
-                const statusText = document.getElementById('status-text');
-                const hoursText = document.getElementById('hours-text');
-                const statusDot = document.getElementById('status-dot');
-                
-                if (statusText && hoursText && statusDot) {
-                    statusText.textContent = 'Aberto';
-                    statusText.className = 'font-medium';
-                    statusText.style.color = 'var(--cor-sucesso)';
-                    statusDot.className = 'w-2 h-2 rounded-full';
-                    statusDot.style.backgroundColor = 'var(--cor-sucesso)';
-                    hoursText.textContent = 'até 23h';
-                }
+                // Não forçar fallback visual; manter último estado conhecido para evitar alternância
             }
         }
 
@@ -11889,8 +11887,8 @@
             document.body.style.overflow = 'hidden';
             
             try {
-                // Fetch CSV data via cache
-                const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                // Fetch CSV data no-cache
+                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 
                 debugLog('CSV loaded successfully:', csvText.substring(0, 200));
                 
