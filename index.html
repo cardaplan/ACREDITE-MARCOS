@@ -2856,6 +2856,35 @@
             return `${url}${separator}v=${Date.now()}&nocache=${Math.random()}`;
         }
         
+        // Novo: adicionar cache-buster com token constante por snapshot
+        function addCacheBusterWithToken(url, token) {
+            const separator = url.includes('?') ? '&' : '?';
+            return `${url}${separator}rt=${encodeURIComponent(token)}&_=${Date.now()}`;
+        }
+        
+        // Novo: fetch uma vez sem cache (no-store) com token
+        async function fetchCSVOnceNoCacheWithToken(url, token, attempt = 0) {
+            const u = addCacheBusterWithToken(url, `${token}-try${attempt}`);
+            const response = await fetch(u, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return await response.text();
+        }
+        
+        // Novo: strong fetch -> lê repetidamente até obter 2 respostas idênticas ou atingir timeout
+        async function fetchCSVStrongWithToken(url, token, maxDurationMs = 1500) {
+            let lastText = null;
+            let attempt = 0;
+            const deadline = Date.now() + maxDurationMs;
+            while (Date.now() < deadline) {
+                const text = await fetchCSVOnceNoCacheWithToken(url, token, attempt++);
+                if (lastText !== null && text === lastText) {
+                    return text;
+                }
+                lastText = text;
+            }
+            return lastText;
+        }
+        
         /**
          * Função para fazer fetch com cache busting
          */
@@ -3273,14 +3302,21 @@
         }
         
         async function fetchAllSheetsNoCache() {
-            const [cfg, cats, items, hrs, neigh, coups] = await Promise.all([
-                loadCSVData(CONFIG_CSV_URL),
-                loadCSVData(CATEGORIES_CSV_URL),
-                loadCSVData(MENU_CSV_URL),
-                loadCSVData(HOURS_CSV_URL),
-                loadCSVData(NEIGHBORHOODS_CSV_URL),
-                loadCSVData(COUPONS_CSV_URL),
+            const token = `rt-${Date.now()}`;
+            const [cfgText, catsText, itemsText, hrsText, neighText, coupsText] = await Promise.all([
+                fetchCSVStrongWithToken(CONFIG_CSV_URL, token),
+                fetchCSVStrongWithToken(CATEGORIES_CSV_URL, token),
+                fetchCSVStrongWithToken(MENU_CSV_URL, token),
+                fetchCSVStrongWithToken(HOURS_CSV_URL, token),
+                fetchCSVStrongWithToken(NEIGHBORHOODS_CSV_URL, token),
+                fetchCSVStrongWithToken(COUPONS_CSV_URL, token),
             ]);
+            const cfg = parseCSV(cfgText || '');
+            const cats = parseCSV(catsText || '');
+            const items = parseCSV(itemsText || '');
+            const hrs = parseCSV(hrsText || '');
+            const neigh = parseCSV(neighText || '');
+            const coups = parseCSV(coupsText || '');
             return { cfg, cats, items, hrs, neigh, coups };
         }
         
@@ -3390,8 +3426,15 @@
         
         function startRealtimeUpdates() {
             if (realtimeInterval) return;
-            applyRealtimeUpdates();
-            realtimeInterval = setInterval(applyRealtimeUpdates, REALTIME_POLL_INTERVAL_MS);
+            let seq = 0;
+            const run = async () => {
+                const mySeq = ++seq;
+                await applyRealtimeUpdates();
+                // somente o último resultado é considerado válido (evita resposta fora de ordem)
+                if (mySeq !== seq) return;
+            };
+            run();
+            realtimeInterval = setInterval(run, REALTIME_POLL_INTERVAL_MS);
         }
         
         let cart = [];
@@ -11609,11 +11652,21 @@
         }
         async function updateOperatingHours() {
             try {
-                // Fetch CSV data with forced no-cache to avoid oscillation
-                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
+                // Usar hoursData em memória se disponível (evita alternância por requisições fora de ordem)
+                let lines = null;
+                if (Array.isArray(hoursData) && hoursData.length > 0 && hoursData[0] && typeof hoursData[0] === 'object') {
+                    // Reconstruir linhas a partir do objeto já parseado
+                    const headers = Object.keys(hoursData[0]);
+                    const rows = [headers.join(',')].concat(hoursData.map(row => headers.map(h => (row[h] ?? '').toString().replace(/,/g, ',')).join(',')));
+                    lines = rows;
+                } else {
+                    // Fallback forte no-cache caso não tenha em memória
+                    const csvText = await fetchCSVStrongWithToken(HOURS_CSV_URL, `hours-${Date.now()}`);
+                    lines = csvText.trim().split('\n');
+                }
                 
-                // Parse CSV manually
-                const lines = csvText.trim().split('\n');
+                // Parse CSV manualmente (linhas já preenchidas)
+                // const lines = csvText.trim().split('\n');
                 
                 // Usar timezone global do config.js
                 const timezone = globalTimezone;
