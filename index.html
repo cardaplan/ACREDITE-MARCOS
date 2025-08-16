@@ -1663,7 +1663,7 @@
             try {
                 debugLog('Loading CSV from:', url);
                 
-                const csvText = await loadCSVTextWithCache(url, CSV_CACHE_TTL_MS);
+                const csvText = await loadCSVTextWithCache(addCacheBuster(url), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 debugLog('CSV loaded:', csvText.length, 'chars');
                 
                 const parsedData = parseCSV(csvText);
@@ -2905,7 +2905,7 @@
         }
         
         async function fetchCSVNetwork(url, fetchOptions = {}) {
-            const response = await fetch(url, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0' }, ...fetchOptions });
+            const response = await fetch(url, { cache: 'no-store', ...fetchOptions });
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
             return await response.text();
         }
@@ -2933,7 +2933,7 @@
             const fetchPromise = (async () => {
                 try {
                     debugLog('🌐 Fetching CSV (network):', url);
-                    const text = await fetchCSVNetwork(addCacheBuster(url), fetchOptions);
+                    const text = await fetchCSVNetwork(url, fetchOptions);
                     // não escrever no cache para atualização em tempo real
                     return text;
                 } catch (e) {
