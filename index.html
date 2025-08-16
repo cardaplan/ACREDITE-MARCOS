@@ -3194,6 +3194,17 @@
                 // Hide preloader and initialize app
                 setTimeout(() => {
                     hidePreloader();
+                    // Preferir snapshot confirmado caso exista para evitar piscadas
+                    if (lastGoodSnapshot) {
+                        try {
+                            configData = lastGoodSnapshot.configData;
+                            categoriesData = lastGoodSnapshot.categoriesData;
+                            menuData = lastGoodSnapshot.menuData;
+                            hoursData = lastGoodSnapshot.hoursData;
+                            neighborhoodsData = lastGoodSnapshot.neighborhoodsData;
+                            couponsData = lastGoodSnapshot.couponsData;
+                        } catch (_) {}
+                    }
                     initializeApp();
                     startRealtimeUpdates();
                 }, 500);
@@ -3260,6 +3271,7 @@
         // ===== ATUALIZAÇÃO EM TEMPO REAL DAS PLANILHAS (POLLING 2s) =====
         const REALTIME_POLL_INTERVAL_MS = 2000; // pode ajustar aqui
         const REALTIME_APPLY_DEBOUNCE_MS = 250; // agrupa múltiplas mudanças próximas
+        const REALTIME_CONFIRMATIONS_REQUIRED = 2; // evita alternância aceitando só após 2 leituras iguais
         let realtimeInterval = null;
         let applyDebounceTimer = null;
         let pendingApplyFlags = {
@@ -3278,6 +3290,15 @@
             neighborhoods: null,
             coupons: null,
         };
+        let candidateHashes = {
+            config: { value: null, confirmations: 0 },
+            categories: { value: null, confirmations: 0 },
+            menu: { value: null, confirmations: 0 },
+            hours: { value: null, confirmations: 0 },
+            neighborhoods: { value: null, confirmations: 0 },
+            coupons: { value: null, confirmations: 0 },
+        };
+        let lastGoodSnapshot = null; // snapshot completo confirmado para uso no reload
         
         function simpleHashForObjects(arr) {
             try {
@@ -3323,7 +3344,27 @@
         function dataHasChanged(newData, type) {
             const currentHash = simpleHashForObjects(newData);
             const prev = lastHashes[type];
-            if (prev === null || prev !== currentHash) {
+            const candidate = candidateHashes[type];
+            if (prev === null) {
+                lastHashes[type] = currentHash;
+                candidate.value = currentHash;
+                candidate.confirmations = REALTIME_CONFIRMATIONS_REQUIRED; // aceita já na carga inicial
+                return true;
+            }
+            if (currentHash === prev) {
+                // igual ao aplicado, zera candidato
+                candidate.value = currentHash;
+                candidate.confirmations = REALTIME_CONFIRMATIONS_REQUIRED;
+                return false;
+            }
+            // Se mudou, só aceita após N confirmações
+            if (candidate.value === currentHash) {
+                candidate.confirmations += 1;
+            } else {
+                candidate.value = currentHash;
+                candidate.confirmations = 1;
+            }
+            if (candidate.confirmations >= REALTIME_CONFIRMATIONS_REQUIRED) {
                 lastHashes[type] = currentHash;
                 return true;
             }
@@ -3416,6 +3457,19 @@
                         }
                     }
                 }
+                // salvar snapshot confirmado para uso no reload
+                try {
+                    lastGoodSnapshot = {
+                        timestamp: Date.now(),
+                        configData: JSON.parse(JSON.stringify(configData)),
+                        categoriesData: JSON.parse(JSON.stringify(categoriesData)),
+                        menuData: JSON.parse(JSON.stringify(menuData)),
+                        hoursData: JSON.parse(JSON.stringify(hoursData)),
+                        neighborhoodsData: JSON.parse(JSON.stringify(neighborhoodsData)),
+                        couponsData: JSON.parse(JSON.stringify(couponsData)),
+                    };
+                } catch (_) {}
+                
                 // reset flags
                 pendingApplyFlags = { config: false, categories: false, menu: false, hours: false, neighborhoods: false, coupons: false };
             }, REALTIME_APPLY_DEBOUNCE_MS);
