@@ -3229,7 +3229,18 @@
         }
         
         // ===== ATUALIZAÇÃO EM TEMPO REAL DAS PLANILHAS (POLLING 2s) =====
+        const REALTIME_POLL_INTERVAL_MS = 2000; // pode ajustar aqui
+        const REALTIME_APPLY_DEBOUNCE_MS = 250; // agrupa múltiplas mudanças próximas
         let realtimeInterval = null;
+        let applyDebounceTimer = null;
+        let pendingApplyFlags = {
+            config: false,
+            categories: false,
+            menu: false,
+            hours: false,
+            neighborhoods: false,
+            coupons: false,
+        };
         let lastHashes = {
             config: null,
             categories: null,
@@ -3323,17 +3334,28 @@
                     shouldUpdateCoupons = true;
                 }
                 
-                if (shouldReapplyConfig) {
+                            // Marcar flags pendentes para aplicar em lote
+            pendingApplyFlags.config = pendingApplyFlags.config || shouldReapplyConfig;
+            pendingApplyFlags.menu = pendingApplyFlags.menu || shouldRerenderMenu;
+            pendingApplyFlags.categories = pendingApplyFlags.categories || shouldRerenderMenu;
+            pendingApplyFlags.hours = pendingApplyFlags.hours || shouldUpdateHours;
+            pendingApplyFlags.neighborhoods = pendingApplyFlags.neighborhoods || shouldUpdateNeighborhoods;
+            pendingApplyFlags.coupons = pendingApplyFlags.coupons || shouldUpdateCoupons;
+
+            // Debounce das aplicações para evitar re-render múltiplo em sequência
+            if (applyDebounceTimer) clearTimeout(applyDebounceTimer);
+            applyDebounceTimer = setTimeout(() => {
+                if (pendingApplyFlags.config) {
                     applyConfiguration();
                 }
-                if (shouldRerenderMenu) {
+                if (pendingApplyFlags.menu || pendingApplyFlags.categories) {
                     renderCategoryNavigation();
                     renderMenu();
                 }
-                if (shouldUpdateHours) {
+                if (pendingApplyFlags.hours) {
                     updateOperatingHours();
                 }
-                if (shouldUpdateNeighborhoods) {
+                if (pendingApplyFlags.neighborhoods) {
                     if (typeof prepareNeighborhoodsAutocomplete === 'function') {
                         prepareNeighborhoodsAutocomplete();
                     }
@@ -3341,7 +3363,7 @@
                         updateCheckoutOrderTotal();
                     }
                 }
-                if (shouldUpdateCoupons) {
+                if (pendingApplyFlags.coupons) {
                     if (appliedCoupon) {
                         const code = (appliedCoupon.codigo_cupom || appliedCoupon.codigo || '').toString().toUpperCase();
                         const refreshed = couponsData.find(c => (c.codigo_cupom || c.codigo || '').toString().toUpperCase() === code);
@@ -3358,6 +3380,9 @@
                         }
                     }
                 }
+                // reset flags
+                pendingApplyFlags = { config: false, categories: false, menu: false, hours: false, neighborhoods: false, coupons: false };
+            }, REALTIME_APPLY_DEBOUNCE_MS);
             } catch (e) {
                 if (typeof warnLog === 'function') warnLog('Realtime update check failed:', e.message);
             }
@@ -3366,7 +3391,7 @@
         function startRealtimeUpdates() {
             if (realtimeInterval) return;
             applyRealtimeUpdates();
-            realtimeInterval = setInterval(applyRealtimeUpdates, 2000);
+            realtimeInterval = setInterval(applyRealtimeUpdates, REALTIME_POLL_INTERVAL_MS);
         }
         
         let cart = [];
