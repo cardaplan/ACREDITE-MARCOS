@@ -1663,7 +1663,7 @@
             try {
                 debugLog('Loading CSV from:', url);
                 
-                const csvText = await loadCSVTextWithCache(url, CSV_CACHE_TTL_MS);
+                const csvText = await loadCSVTextWithCache(addCacheBuster(url), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 debugLog('CSV loaded:', csvText.length, 'chars');
                 
                 const parsedData = parseCSV(csvText);
@@ -2874,8 +2874,8 @@
             return fetch(cacheBustedUrl, fetchOptions);
         }
         
-        // CSV caching utilities (30-minute TTL; stale-if-error)
-        const CSV_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutos
+        // CSV caching utilities (disabled for real-time updates)
+        const CSV_CACHE_TTL_MS = 0; // desabilitado para atualização em tempo real
         const CSV_CACHE_PREFIX = 'csv_cache_v1::';
         const inFlightCSVRequests = new Map();
         
@@ -2905,7 +2905,7 @@
         }
         
         async function fetchCSVNetwork(url, fetchOptions = {}) {
-            const response = await fetch(url, { cache: 'no-cache', ...fetchOptions });
+            const response = await fetch(url, { cache: 'no-store', ...fetchOptions });
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
             return await response.text();
         }
@@ -2915,7 +2915,7 @@
             const cached = readCSVCache(url);
             const isFresh = cached && (Date.now() - cached.timestamp) < ttlMs;
             
-            if (isFresh && !forceRefresh) {
+            if (isFresh && !forceRefresh && false) {
                 debugLog('🗃️ Using cached CSV:', url);
                 return cached.text;
             }
@@ -2925,7 +2925,7 @@
                 try {
                     return await inFlightCSVRequests.get(url);
                 } catch (e) {
-                    if (cached) return cached.text; // stale-if-error
+                    if (cached && false) return cached.text; // stale-if-error desativado para tempo real
                     throw e;
                 }
             }
@@ -2934,11 +2934,11 @@
                 try {
                     debugLog('🌐 Fetching CSV (network):', url);
                     const text = await fetchCSVNetwork(url, fetchOptions);
-                    writeCSVCache(url, text);
+                    // não escrever no cache para atualização em tempo real
                     return text;
                 } catch (e) {
                     warnLog('⚠️ Network fetch failed, using cached CSV if available:', url, e);
-                    if (cached) return cached.text; // stale-if-error
+                    if (cached && false) return cached.text; // stale-if-error desativado para tempo real
                     throw e;
                 } finally {
                     inFlightCSVRequests.delete(url);
@@ -3166,6 +3166,7 @@
                 setTimeout(() => {
                     hidePreloader();
                     initializeApp();
+                    startRealtimeUpdates();
                 }, 500);
             } catch (error) {
                 errorLog('Error loading data:', error);
@@ -3226,7 +3227,173 @@
             
             debugLog('✅ Restauração de dados concluída');
         }
+        
+        // ===== ATUALIZAÇÃO EM TEMPO REAL DAS PLANILHAS (POLLING 2s) =====
+        const REALTIME_POLL_INTERVAL_MS = 2000; // pode ajustar aqui
+        const REALTIME_APPLY_DEBOUNCE_MS = 250; // agrupa múltiplas mudanças próximas
+        let realtimeInterval = null;
+        let applyDebounceTimer = null;
+        let pendingApplyFlags = {
+            config: false,
+            categories: false,
+            menu: false,
+            hours: false,
+            neighborhoods: false,
+            coupons: false,
+        };
+        let lastHashes = {
+            config: null,
+            categories: null,
+            menu: null,
+            hours: null,
+            neighborhoods: null,
+            coupons: null,
+        };
+        
+        function simpleHashForObjects(arr) {
+            try {
+                function sortObjectKeysDeep(obj) {
+                    if (Array.isArray(obj)) {
+                        return obj.map(sortObjectKeysDeep);
+                    } else if (obj && typeof obj === 'object') {
+                        const sorted = {};
+                        Object.keys(obj).sort().forEach(k => { sorted[k] = sortObjectKeysDeep(obj[k]); });
+                        return sorted;
+                    }
+                    return obj;
+                }
+                const normalized = JSON.stringify(sortObjectKeysDeep(Array.isArray(arr) ? arr : [arr]));
+                let hash = 0; for (let i = 0; i < normalized.length; i++) { hash = ((hash << 5) - hash) + normalized.charCodeAt(i); hash |= 0; }
+                return hash;
+            } catch (_) {
+                const text = Array.isArray(arr) ? JSON.stringify(arr).slice(0, 512) : String(arr);
+                let hash = 0; for (let i = 0; i < text.length; i++) { hash = ((hash << 5) - hash) + text.charCodeAt(i); hash |= 0; }
+                return hash;
+            }
+        }
+        
+        async function fetchAllSheetsNoCache() {
+            const [cfg, cats, items, hrs, neigh, coups] = await Promise.all([
+                loadCSVData(CONFIG_CSV_URL),
+                loadCSVData(CATEGORIES_CSV_URL),
+                loadCSVData(MENU_CSV_URL),
+                loadCSVData(HOURS_CSV_URL),
+                loadCSVData(NEIGHBORHOODS_CSV_URL),
+                loadCSVData(COUPONS_CSV_URL),
+            ]);
+            return { cfg, cats, items, hrs, neigh, coups };
+        }
+        
+        function dataHasChanged(newData, type) {
+            const currentHash = simpleHashForObjects(newData);
+            const prev = lastHashes[type];
+            if (prev === null || prev !== currentHash) {
+                lastHashes[type] = currentHash;
+                return true;
+            }
+            return false;
+        }
+        
+        async function applyRealtimeUpdates() {
+            try {
+                const { cfg, cats, items, hrs, neigh, coups } = await fetchAllSheetsNoCache();
+                let shouldRerenderMenu = false;
+                let shouldReapplyConfig = false;
+                let shouldUpdateHours = false;
+                let shouldUpdateNeighborhoods = false;
+                let shouldUpdateCoupons = false;
+                
+                if (dataHasChanged(cfg, 'config')) {
+                    configData = cfg;
+                    appConfig = processConfigData(configData);
+                    shouldReapplyConfig = true;
+                }
+                if (dataHasChanged(cats, 'categories')) {
+                    categoriesData = cats;
+                    shouldRerenderMenu = true;
+                }
+                if (dataHasChanged(items, 'menu')) {
+                    const categoriesForProcessing = categoriesData && categoriesData.length ? categoriesData : cats;
+                    menuData = processMenuData(items, categoriesForProcessing);
+                    shouldRerenderMenu = true;
+                }
+                if (dataHasChanged(hrs, 'hours')) {
+                    hoursData = hrs;
+                    shouldUpdateHours = true;
+                }
+                if (dataHasChanged(neigh, 'neighborhoods')) {
+                    neighborhoodsData = neigh.map(row => ({
+                        bairro: (row.bairro || row.nome_bairro || row.Bairro || row.BAIRRO || '').trim().toLowerCase(),
+                        taxa: parseFloat((row.taxa || row.valor_taxa || row.Taxa || row.TAXA || '0').toString().replace(',', '.')) || 0
+                    })).filter(item => item.bairro);
+                    window.neighborhoodsData = neighborhoodsData;
+                    shouldUpdateNeighborhoods = true;
+                }
+                if (dataHasChanged(coups, 'coupons')) {
+                    couponsData = coups;
+                    shouldUpdateCoupons = true;
+                }
+                
+                            // Marcar flags pendentes para aplicar em lote
+            pendingApplyFlags.config = pendingApplyFlags.config || shouldReapplyConfig;
+            pendingApplyFlags.menu = pendingApplyFlags.menu || shouldRerenderMenu;
+            pendingApplyFlags.categories = pendingApplyFlags.categories || shouldRerenderMenu;
+            pendingApplyFlags.hours = pendingApplyFlags.hours || shouldUpdateHours;
+            pendingApplyFlags.neighborhoods = pendingApplyFlags.neighborhoods || shouldUpdateNeighborhoods;
+            pendingApplyFlags.coupons = pendingApplyFlags.coupons || shouldUpdateCoupons;
 
+            // Debounce das aplicações para evitar re-render múltiplo em sequência
+            if (applyDebounceTimer) clearTimeout(applyDebounceTimer);
+            applyDebounceTimer = setTimeout(() => {
+                if (pendingApplyFlags.config) {
+                    applyConfiguration();
+                }
+                if (pendingApplyFlags.menu || pendingApplyFlags.categories) {
+                    renderCategoryNavigation();
+                    renderMenu();
+                }
+                if (pendingApplyFlags.hours) {
+                    updateOperatingHours();
+                }
+                if (pendingApplyFlags.neighborhoods) {
+                    if (typeof prepareNeighborhoodsAutocomplete === 'function') {
+                        prepareNeighborhoodsAutocomplete();
+                    }
+                    if (typeof updateCheckoutOrderTotal === 'function') {
+                        updateCheckoutOrderTotal();
+                    }
+                }
+                if (pendingApplyFlags.coupons) {
+                    if (appliedCoupon) {
+                        const code = (appliedCoupon.codigo_cupom || appliedCoupon.codigo || '').toString().toUpperCase();
+                        const refreshed = couponsData.find(c => (c.codigo_cupom || c.codigo || '').toString().toUpperCase() === code);
+                        if (refreshed) {
+                            appliedCoupon = refreshed;
+                            const discount = calculateCouponDiscount(appliedCoupon);
+                            couponDiscount = discount;
+                        } else {
+                            appliedCoupon = null;
+                            couponDiscount = 0;
+                        }
+                        if (typeof updateCheckoutOrderTotal === 'function') {
+                            updateCheckoutOrderTotal();
+                        }
+                    }
+                }
+                // reset flags
+                pendingApplyFlags = { config: false, categories: false, menu: false, hours: false, neighborhoods: false, coupons: false };
+            }, REALTIME_APPLY_DEBOUNCE_MS);
+            } catch (e) {
+                if (typeof warnLog === 'function') warnLog('Realtime update check failed:', e.message);
+            }
+        }
+        
+        function startRealtimeUpdates() {
+            if (realtimeInterval) return;
+            applyRealtimeUpdates();
+            realtimeInterval = setInterval(applyRealtimeUpdates, REALTIME_POLL_INTERVAL_MS);
+        }
+        
         let cart = [];
         let currentProduct = null;
         let currentStep = 1;
@@ -6724,7 +6891,7 @@
         function checkIfOpenAtTime(dayOfWeek, timeInMinutes) {
             return new Promise(async (resolve) => {
                 try {
-                    const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                    const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                     const lines = csvText.trim().split('\n');
                     
                     // Procurar pelo dia da semana (começando da linha 1, pois linha 0 é cabeçalho)
@@ -6781,7 +6948,7 @@
          */
         async function getNextOpenTime() {
             try {
-                const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 const lines = csvText.trim().split('\n');
                 const currentTime = getCurrentDateInTimezone();
                 const currentDay = currentTime.getDay();
@@ -11442,8 +11609,8 @@
         }
         async function updateOperatingHours() {
             try {
-                // Fetch CSV data via cache for stability
-                const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                // Fetch CSV data with forced no-cache to avoid oscillation
+                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 
                 // Parse CSV manually
                 const lines = csvText.trim().split('\n');
@@ -11525,19 +11692,7 @@
                 
             } catch (error) {
                 errorLog('Error updating operating hours:', error);
-                // Fallback to static display
-                const statusText = document.getElementById('status-text');
-                const hoursText = document.getElementById('hours-text');
-                const statusDot = document.getElementById('status-dot');
-                
-                if (statusText && hoursText && statusDot) {
-                    statusText.textContent = 'Aberto';
-                    statusText.className = 'font-medium';
-                    statusText.style.color = 'var(--cor-sucesso)';
-                    statusDot.className = 'w-2 h-2 rounded-full';
-                    statusDot.style.backgroundColor = 'var(--cor-sucesso)';
-                    hoursText.textContent = 'até 23h';
-                }
+                // Não forçar fallback visual; manter último estado conhecido para evitar alternância
             }
         }
 
@@ -11757,8 +11912,8 @@
             document.body.style.overflow = 'hidden';
             
             try {
-                // Fetch CSV data via cache
-                const csvText = await loadCSVTextWithCache(HOURS_CSV_URL, CSV_CACHE_TTL_MS);
+                // Fetch CSV data no-cache
+                const csvText = await loadCSVTextWithCache(addCacheBuster(HOURS_CSV_URL), 0, { forceRefresh: true, fetchOptions: { cache: 'no-store' } });
                 
                 debugLog('CSV loaded successfully:', csvText.substring(0, 200));
                 
